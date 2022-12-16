@@ -6,6 +6,7 @@ import functools
 from uuid import UUID
 from dataclasses import dataclass
 from pathlib import Path
+from fnmatch import fnmatch
 from typing import Callable, Optional, Dict, Any, Union, List
 
 try:
@@ -27,7 +28,7 @@ USER_CONFIG_FILE = 'user_config.toml'
 DATA_FILE = 'data.json'
 
 
-class UploaderConfigError(Exception):
+class ConfigError(Exception):
     pass
 
 
@@ -36,6 +37,10 @@ class NoAvailableUploaderError(Exception):
 
 
 class UploaderNotFoundError(Exception):
+    pass
+
+
+class UploaderNotAvailableError(Exception):
     pass
 
 
@@ -113,6 +118,19 @@ class Uploader:
         return callable(self.upload_method)
 
 
+@dataclass
+class UploadRule:
+    """上传规则"""
+    name: str
+    pattern: str
+    uploader: Uploader
+    match_mode: str = 'name'
+    plugins: List[str] = None
+
+    def match(self, path: Path) -> bool:
+        return fnmatch(path.name, self.pattern)
+
+
 class UploaderProxy:
     """Upload files through uploader."""
 
@@ -137,10 +155,16 @@ class UploaderProxy:
             self.user_config_path = self._home.joinpath(USER_CONFIG_FILE)
 
         # load config
-        self._cfg_clients, self._cfg_uploaders, self._cfg_cases = self._load_config()
+        self.app_config, self.user_config = self._load_config()
+        self._cfg_clients = self._get_config('client')
+        self._cfg_uploaders = self._get_config('uploader')
+        self._cfg_plugins = self._get_config('plugin')
+        self._cfg_rules = self._get_config('rule')
 
         self._clients: Dict[str, UploaderClient] = self._init_clients()
         self._uploaders: Dict[str, Uploader] = self._init_uploaders()
+        self._plugins: Dict = self._init_plugins()
+        self._rules: Dict[str, UploadRule] = self._init_rules()
 
         self._selected_uploader = None
 
@@ -150,29 +174,24 @@ class UploaderProxy:
         else:
             self._history_data = {}
 
-        self._plugins = []
-
     def _load_config(self):
-        _cfg_clients = DEFAULT_CONFIG.get('client', {})  # Client 的配置
-        _cfg_uploaders = DEFAULT_CONFIG.get('uploader', {})  # Uploader 的配置
-        _cfg_cases = DEFAULT_CONFIG.get('cases', [])  #
-
-        app_cfg = toml.loads(self._app_config_path.read_text(encoding='utf-8'))
-        if not isinstance(app_cfg, dict):
+        app_config = toml.loads(self._app_config_path.read_text(encoding='utf-8'))
+        if not isinstance(app_config, dict):
             raise ValueError(f'"{self._app_config_path}" has invalid content.')
-        _cfg_clients.update(app_cfg.get('client', {}))
-        _cfg_uploaders.update(app_cfg.get('uploader', {}))
-        _cfg_cases.extend(app_cfg.get('cases', []))
 
         if self.user_config_path and self.user_config_path.is_file():
-            user_cfg = toml.loads(self.user_config_path.read_text(encoding='utf-8'))
-            if not isinstance(user_cfg, dict):
+            user_config = toml.loads(self.user_config_path.read_text(encoding='utf-8'))
+            if not isinstance(user_config, dict):
                 raise ValueError(f'"{self.user_config_path}" has invalid content.')
-            _cfg_clients.update(user_cfg.get('client', {}))
-            _cfg_uploaders.update(user_cfg.get('uploader', {}))
-            _cfg_cases.extend(user_cfg.get('cases', []))
+        else:
+            user_config = {}
+        return app_config, user_config
 
-        return _cfg_clients, _cfg_uploaders, _cfg_cases
+    def _get_config(self, name):
+        _cfg = DEFAULT_CONFIG.get(name, {})
+        _cfg.update(self.app_config.get(name, {}))
+        _cfg.update(self.user_config.get(name, {}))
+        return _cfg
 
     def _init_clients(self):
         _clients = {}
@@ -207,55 +226,70 @@ class UploaderProxy:
                 raise ValueError(f'Uploader name already exists: {ue.name}.')
         return _uploaders
 
+    def _init_plugins(self):
+        _plugins = {}
+        for name in self._cfg_plugins:
+            plugin_pth = self._cfg_plugins[name]
+            _, plugin = import_module(plugin_pth)
+            _plugins[name] = plugin
+        return _plugins
+
+    def _init_rules(self):
+        _rules = {}
+        for name in self._cfg_rules:
+            rule_cfg = self._cfg_rules[name]
+            uploader_name = rule_cfg.pop('uploader')
+            if uploader_name not in self._uploaders:
+                raise ConfigError(f'uploader {uploader_name} not exists.')
+            uploader = self._uploaders[uploader_name]
+            rule = UploadRule(name, uploader=uploader, **rule_cfg)
+            _rules[name] = rule
+        return _rules
+
     @property
     def current_uploader(self):
         if not self._selected_uploader:
             self._auto_select()
         return self._selected_uploader
 
-    def __call__(self, *args, **kwargs):
-        return self.upload(*args, **kwargs)
+    def __call__(self, path, **kwargs):
+        return self.run_upload(path=path, **kwargs)
 
-    @property
-    def upload(self):
-        method = self._upload
-        for plugin in self._plugins:
-            method = plugin(method)
-        return method
+    def run_upload(self, path: Union[str, Path], **kwargs):
+        if isinstance(path, str):
+            path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f'{path} 不存在。')
 
-    def _upload(self, path: Path,
-                rename: Union[str, Callable[[Path], str]] = None,
-                uploader: str = None,
-                **kwargs):
-        path = Path(path)
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        # upload as a rename
-        if rename:
-            if callable(rename):
-                rename = rename(path)
-            elif isinstance(rename, str):
-                rename = rename
-            else:
-                raise ValueError("rename must be a function or str.")
+        uploader_name = kwargs.pop('uploader', '')
+        plugins = kwargs.pop('plugins', [])
+
+        if uploader_name:       # 用户指定了名字
+            uploader = self.get_uploader(uploader_name)
         else:
-            rename = path.name
-        rename = rename.replace(' ', '-')
-        # prepare uploader
-        uploader = self.get_uploader(uploader)
+            matched_rule = self._search_rule(path)
+            if matched_rule:
+                uploader = matched_rule.uploader
+                plugins = matched_rule.plugins
+            else:
+                uploader = self._auto_select()
+
+        method = uploader.upload_method
+
+        for plugin_name in plugins:
+            plugin = self._plugins[plugin_name]
+            method = plugin(method)
 
         try:
-            url = uploader.upload(path, rename=rename, **kwargs)
+            return method(path, **kwargs)
         except Exception as err:
             raise UploadError(f'Exception happens when upload: {err}')
-        else:
-            # if file_history:
-            #     file_history[uploader_key] = url
-            #     self._save_db()
-            return url
 
     def _save_db(self):
         self._data_path.write_text(json.dumps(self._history_data), encoding='utf-8')
+
+    def _search_rule(self, path: Path) -> Optional[UploadRule]:
+        pass
 
     def _auto_select(self) -> Uploader:
         if self._selected_uploader:
@@ -268,12 +302,15 @@ class UploaderProxy:
                 return u
         raise NoAvailableUploaderError()
 
-    def get_uploader(self, name: str = '') -> Uploader:
+    def get_uploader(self, name: str = '', available=True) -> Uploader:
         """Return an uploader entity."""
         if name:
-            if name in self._uploaders:
-                return self._uploaders[name]
-            raise UploaderNotFoundError(f'{name}')
+            if name not in self._uploaders:
+                raise UploaderNotFoundError(f'指定的 Uploader 不存在: {name}')
+            uploader = self._uploaders[name]
+            if available and not uploader.available():
+                raise UploaderNotAvailableError(f'指定的 Uploader 不可用: {name}')
+            return uploader
         else:
             return self._auto_select()
 
@@ -283,10 +320,6 @@ class UploaderProxy:
         self._selected_uploader = upr
         return self
 
-    def append_plugin(self, plugin):
-        if callable(plugin):
-            self._plugins.append(plugin)
-
     def show_history(self):
         print(self._history_data)
         return self._history_data
@@ -295,5 +328,5 @@ class UploaderProxy:
 if __name__ == '__main__':
     up = UploaderProxy(force_init=True)
     print(__file__)
-    x = up(__file__)
+    x = up(__file__, uploader='alioss', plugins=['markdown_link', 'clipboard'])
     print(x)

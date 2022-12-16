@@ -1,3 +1,4 @@
+# noinspection SpellCheckingInspection
 DEFAULT_CONFIG = {
     'client': {
         'alioss': {
@@ -9,6 +10,11 @@ DEFAULT_CONFIG = {
         'command': {
             'path': 'oneupload.clients.command:upload_factory',
         }
+    },
+    'plugin': {
+        'logging': 'oneupload.plugin:LoggingPlugin',
+        'markdown_link': 'oneupload.plugin:MarkdownLinkPlugin',
+        'clipboard': 'oneupload.plugin:ClipboardPlugin'
     }
 }
 
