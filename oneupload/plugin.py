@@ -1,5 +1,6 @@
 import functools
-from abc import ABCMeta, abstractmethod
+import time
+from abc import ABCMeta
 
 
 class Plugin(metaclass=ABCMeta):
@@ -38,9 +39,13 @@ class LoggingPlugin(Plugin):
         print('Output: ', self._output)
 
 
-class CachePlugin(Plugin):
+class TimeitPlugin(Plugin):
     def pre_upload(self):
-        pass
+        self._start_time = time.time()
+
+    def post_upload(self):
+        elapsed = time.time() - self._start_time
+        print(f'本次上传花费时间: {elapsed}')
 
 
 class MarkdownLinkPlugin(Plugin):

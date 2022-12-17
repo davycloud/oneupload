@@ -14,7 +14,8 @@ DEFAULT_CONFIG = {
     'plugin': {
         'logging': 'oneupload.plugin:LoggingPlugin',
         'markdown_link': 'oneupload.plugin:MarkdownLinkPlugin',
-        'clipboard': 'oneupload.plugin:ClipboardPlugin'
+        'clipboard': 'oneupload.plugin:ClipboardPlugin',
+        'timeit': 'oneupload.plugin:TimeitPlugin',
     }
 }
 
