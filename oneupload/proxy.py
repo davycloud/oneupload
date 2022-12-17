@@ -123,7 +123,7 @@ class UploadRule:
     """上传规则"""
     name: str
     pattern: str
-    uploader: Uploader
+    uploader: str
     match_mode: str = 'name'
     plugins: List[str] = None
 
@@ -241,8 +241,7 @@ class UploaderProxy:
             uploader_name = rule_cfg.pop('uploader')
             if uploader_name not in self._uploaders:
                 raise ConfigError(f'uploader {uploader_name} not exists.')
-            uploader = self._uploaders[uploader_name]
-            rule = UploadRule(name, uploader=uploader, **rule_cfg)
+            rule = UploadRule(name, uploader=uploader_name, **rule_cfg)
             _rules[name] = rule
         return _rules
 
@@ -264,16 +263,14 @@ class UploaderProxy:
         uploader_name = kwargs.pop('uploader', '')
         plugins = kwargs.pop('plugins', [])
 
-        if uploader_name:       # 用户指定了名字
-            uploader = self.get_uploader(uploader_name)
-        else:
+        if not uploader_name:       # 用户没有指定名字
+            # 尝试搜索匹配规则
             matched_rule = self._search_rule(path)
             if matched_rule:
-                uploader = matched_rule.uploader
+                uploader_name = matched_rule.uploader
                 plugins = matched_rule.plugins
-            else:
-                uploader = self._auto_select()
 
+        uploader = self.get_uploader(uploader_name)
         method = uploader.upload_method
 
         for plugin_name in plugins:
