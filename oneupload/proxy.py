@@ -1,9 +1,9 @@
 import os
+import re
 import json
 import inspect
-import hashlib
-import functools
-from uuid import UUID
+import contextlib
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from fnmatch import fnmatch
@@ -14,7 +14,7 @@ try:
 except ImportError:
     import tomli as toml
 
-from oneupload.utils import get_app_dir, import_module
+from oneupload.utils import get_app_dir, import_module, md5
 from oneupload.config import DEFAULT_CONFIG, INIT_CONFIG_TEXT
 
 PACKAGE_NAME = 'oneupload'
@@ -25,7 +25,7 @@ HOME_DEFAULT = get_app_dir(PACKAGE_NAME)
 
 CONFIG_FILE = 'config.toml'
 USER_CONFIG_FILE = 'user_config.toml'
-DATA_FILE = 'data.json'
+HISTORY_DATA_FILE = 'history.json'
 
 
 class ConfigError(Exception):
@@ -124,11 +124,20 @@ class UploadRule:
     name: str
     pattern: str
     uploader: str
-    match_mode: str = 'name'
+    match_method: str = 'fnmatch'
     plugins: List[str] = None
 
     def match(self, path: Path) -> bool:
-        return fnmatch(path.name, self.pattern)
+        to_match = path.absolute()
+        method = self.match_method.lower()
+
+        if method == 'fnmatch':
+            return fnmatch(to_match.as_posix(), self.pattern)
+        elif method == 're':
+            return bool(re.match(self.pattern, to_match.as_posix()))
+        elif method == 'eval':
+            return eval(self.pattern)
+        return False
 
 
 class UploaderProxy:
@@ -168,9 +177,9 @@ class UploaderProxy:
 
         self._selected_uploader = None
 
-        self._data_path = self._home.joinpath(DATA_FILE)
-        if self._data_path.is_file():
-            self._history_data = json.loads(self._data_path.read_text(encoding='utf-8'))
+        self._history_data_path = self._home.joinpath(HISTORY_DATA_FILE)
+        if self._history_data_path.is_file():
+            self._history_data = json.loads(self._history_data_path.read_text(encoding='utf-8'))
         else:
             self._history_data = {}
 
@@ -271,19 +280,60 @@ class UploaderProxy:
                 plugins = matched_rule.plugins
 
         uploader = self.get_uploader(uploader_name)
-        method = uploader.upload_method
 
+        save_history = kwargs.pop('save_history', True)
+        if save_history:
+            return self._upload_with_history_data(path, uploader, plugins, kwargs)
+        else:
+            return self._upload(path, uploader.upload_method, plugins, kwargs)
+
+    def _upload_with_history_data(self, path, uploader, plugins, kwargs):
+        with self._history_context(path) as history:
+            key = uploader.unique_id
+            url = history.get(key)
+
+            if url:
+                def method(p, **kws):
+                    return url
+            else:
+                def method(p, **kws):
+                    history[key] = uploader.upload_method(p, **kws)
+                    return history[key]
+
+            return self._upload(path, method, plugins, kwargs)
+
+    def _upload(self, path, method, plugins, kwargs):
         for plugin_name in plugins:
             plugin = self._plugins[plugin_name]
             method = plugin(method)
-
         try:
             return method(path, **kwargs)
         except Exception as err:
             raise UploadError(f'Exception happens when upload: {err}')
 
-    def _save_db(self):
-        self._data_path.write_text(json.dumps(self._history_data), encoding='utf-8')
+    def _load_history_data(self):
+        if self._history_data_path.is_file():
+            self._history_data = json.loads(self._history_data_path.read_text(encoding='utf-8'))
+        else:
+            self._history_data = {}
+
+    def _save_history_data(self):
+        self._history_data_path.write_text(json.dumps(self._history_data), encoding='utf-8')
+
+    @contextlib.contextmanager
+    def _history_context(self, path):
+        self._load_history_data()
+        file_key = md5(path)
+        now = datetime.now().isoformat(timespec='seconds')
+        file_history = self._history_data.setdefault(file_key, {})
+        if not file_history:
+            file_history.update({'_path': path.absolute().as_posix(),
+                                 '_created_at': now,
+                                 })
+        try:
+            yield file_history
+        finally:
+            self._save_history_data()
 
     def _search_rule(self, path: Path) -> Optional[UploadRule]:
         pass
@@ -325,5 +375,5 @@ class UploaderProxy:
 if __name__ == '__main__':
     up = UploaderProxy(force_init=True)
     print(__file__)
-    x = up(__file__, uploader='alioss', plugins=['markdown_link', 'clipboard'])
+    x = up(__file__, uploader='alioss', plugins=['markdown_link', 'clipboard', 'timeit'])
     print(x)

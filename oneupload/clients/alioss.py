@@ -33,7 +33,7 @@ class AliOSS:
         self.bucket_name = self.bucket.bucket_name
 
     @property
-    def unique_key(self) -> str:
+    def unique_id(self) -> str:
         return f'{self.bucket_name}.{self._host}'
 
     def upload(self, local_file, rename=None):

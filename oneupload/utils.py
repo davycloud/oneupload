@@ -1,7 +1,9 @@
+import hashlib
 import os
 import sys
 import uuid
 import importlib
+from pathlib import Path
 
 from typing import Dict
 
@@ -77,6 +79,12 @@ def import_module(path: str):
     else:
         attr = None
     return mod, attr
+
+
+def md5(path: Path):
+    md = hashlib.md5()
+    md.update(path.read_bytes())
+    return md.hexdigest()
 
 
 def unique_id(ns: uuid.UUID, name: str, data: Dict):

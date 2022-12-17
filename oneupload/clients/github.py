@@ -33,7 +33,7 @@ class GitHub:
         self._opener.addheaders = list(self.headers.items())
 
     @property
-    def unique_key(self) -> str:
+    def unique_id(self) -> str:
         return f'github/{self.owner}/{self.repo}'
 
     def _request(self, url, data=None, headers=None, method='GET'):
